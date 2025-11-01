@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "RL_factor_style_investing"
+version = "0.1.0"
+description = "A reinforcement learning framework for investing strategies"
+authors = ["Przemyslaw Gradzki <p.gradzki@uw.edu.pl>"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "RL_factor_style_investing"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+numpy = "*"
+pandas = "*"
+matplotlib = "*"
+scipy = "*"
+gymnasium = "*"
+torch = "*"
+stable-baselines3 = "*"
+tensorboard = "*"
+wandb = "*"
+
+# GitHub dependency
+# FinRL = { git = "https://github.com/pgradz/FinRL.git" }
+# local dependency
+FinRL = { path = "../FinRL", develop = true }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+black = "*"
+flake8 = "*"
+mypy = "*"
