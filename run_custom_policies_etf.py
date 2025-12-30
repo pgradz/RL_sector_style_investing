@@ -14,7 +14,14 @@ from finrl.meta.preprocessor.preprocessors import FeatureEngineer, data_split
 from finrl.meta.env_portfolio_allocation.env_portfolio import StockPortfolioEnv
 from finrl.meta.env_portfolio_allocation.env_portfolio_sequence import StockPortfolioSequenceEnv
 from finrl.meta.env_stock_trading.env_stocktrading_sequence import StockTradingSequenceEnv
-from finrl.agents.stablebaselines3.models import DRLAgent, CustomLSTMPolicy, CustomTransformerPolicy, CustomCNNPolicy, CustomCNNLSTMPolicy
+from finrl.agents.stablebaselines3.models import (
+    DRLAgent, 
+    get_cnn_policy,
+    get_lstm_policy,
+    get_transformer_policy,
+    get_cnn_lstm_policy,
+    PolicyRegistry
+)
 import torch
 from finrl.plot import backtest_stats, backtest_plot, get_daily_return, get_baseline,convert_daily_return_to_pyfolio_ts
 from finrl.meta.data_processor import DataProcessor
@@ -23,20 +30,58 @@ from finrl.meta.data_processors.processor_yahoofinance import YahooFinanceProces
 from pyfolio import timeseries
 sys.path.append("../FinRL-Library")
 
-TOTAL_TIMESTEPS = 100000
-policy = CustomCNNPolicy
-# TODO: to use other algos, policies have to be refactor to inherit from different parent clases
-'''    POLICY_BASES = {
-        'ppo': ActorCriticPolicy,
-        'a2c': ActorCriticPolicy,
-        'ddpg': DDPGPolicy,
-        'td3': TD3Policy,
-        'sac': SACPolicy,
-    }'''
+TOTAL_TIMESTEPS = 50000
 
+# ============================================================================
+# FLEXIBLE POLICY SELECTION USING REGISTRY PATTERN
+# ============================================================================
+# Now you can easily switch between different RL algorithms and feature extractors!
+# 
+# Supported Models: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
+# Supported Feature Extractors: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+#
+# Examples:
+#   - CNN with PPO:         model='ppo',  feature_extractor='CustomCNN'
+#   - LSTM with DDPG:       model='ddpg', feature_extractor='CustomLSTM'
+#   - Transformer with SAC: model='sac',  feature_extractor='CustomTransformer'
+#   - CNN-LSTM with TD3:    model='td3',  feature_extractor='CustomCNNLSTM'
+# ============================================================================
 
-model = 'ppo'
+model = 'ddpg'  # Choose: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
+feature_extractor = 'CustomCNN'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+
+# Get the policy dynamically from the registry
+policy = PolicyRegistry.get_policy(feature_extractor, model)
+print(f"\n{'='*60}")
+print(f"Using policy: {policy.__name__}")
+print(f"Model: {model.upper()}, Feature Extractor: {feature_extractor}")
+print(f"{'='*60}\n")
+
 ENV_TYPE = 'portfolio'  # NEW: Choose 'portfolio' or 'trading'
+
+def create_results_subfolder(model_name: str, feature_extractor: str, env_type: str, 
+                             reward_type: str, sequence_length: int) -> str:
+    """
+    Create and return a results subfolder path based on configuration.
+    
+    Args:
+        model_name: Name of the RL algorithm (e.g., 'ppo', 'ddpg')
+        feature_extractor: Feature extractor name (e.g., 'CustomCNN')
+        env_type: Environment type ('portfolio' or 'trading')
+        reward_type: Reward type (e.g., 'dsr', 'pnl')
+        sequence_length: Sequence length for temporal models
+        
+    Returns:
+        Path to the results subfolder
+    """
+    # Create descriptive folder name
+    folder_name = f"{model_name}_{feature_extractor}_{env_type}_reward_{reward_type}_seq{sequence_length}"
+    results_path = os.path.join(config.RESULTS_DIR, folder_name)
+    
+    # Create the directory if it doesn't exist
+    os.makedirs(results_path, exist_ok=True)
+    
+    return results_path
 
 if not os.path.exists("./" + config.DATA_SAVE_DIR):
     os.makedirs("./" + config.DATA_SAVE_DIR)
@@ -47,12 +92,12 @@ if not os.path.exists("./" + config.TENSORBOARD_LOG_DIR):
 if not os.path.exists("./" + config.RESULTS_DIR):
     os.makedirs("./" + config.RESULTS_DIR)
 
-train = pd.read_csv('datasets/train_data.csv',parse_dates=['date'])
-trade = pd.read_csv('datasets/trade_data.csv',parse_dates=['date'])
-df = pd.concat([train,trade])
+# train = pd.read_csv('datasets/train_data.csv',parse_dates=['date'])
+# trade = pd.read_csv('datasets/trade_data.csv',parse_dates=['date'])
+# df = pd.concat([train,trade])
 
-etf = pd.read_csv('datasets/sector_ETFs.csv',parse_dates=['date'])
-stocks = [ 'SPY', 'TLT', 'XLE', 'XLF', 'XLI', 'XLK','XLU', 'XLV', 'XLY']
+etf = pd.read_csv('datasets/sector_data_adj_close.csv',parse_dates=['date'])
+stocks = [ 'SPY', 'TLT', 'BIL', 'XLE', 'XLF', 'XLI', 'XLK','XLU', 'XLV', 'XLY', 'XLB', 'XLP']
 df = etf.loc[etf['tic'].isin(stocks)]
 macro_indicators = ['DBC', 'DX-Y.NYB', 'GLD','^MOVE', '^TNX', '^VIX'] # 'BDRY' removed because of missing
 
@@ -133,7 +178,7 @@ elif ENV_TYPE == 'trading':
         "buy_cost_pct": [0.001] * stock_dimension,  # Required for trading env
         "sell_cost_pct": [0.001] * stock_dimension, # Required for trading env
         "stock_dim": stock_dimension,
-        "state_space": stock_dimension,  # Required for trading env
+        "state_space": stock_dimension,  # Required for trading env - it is not used. consider eliminating
         "tech_indicator_list": config.INDICATORS,
         #"tech_indicator_list": [],
         "action_space": stock_dimension,
@@ -205,6 +250,72 @@ param_grid_ddpg = [
         "learning_starts": 1_500
     }
 ]
+param_grid_td3 = [
+    # Variant 0: Conservative baseline - stable learning
+    {
+        "buffer_size": 100_000,      # Large buffer for 14 years of data
+        "learning_rate": 3e-4,       # Standard learning rate
+        "batch_size": 256,           # Larger batch for stability
+        "tau": 0.005,                # Slow target network updates
+        "gamma": 0.99,               # Standard discount factor
+        "policy_delay": 2,           # TD3's delayed policy updates (key feature)
+        "target_policy_noise": 0.2,  # TD3's target policy smoothing
+        "target_noise_clip": 0.5,    # Clip noise for stability
+        "learning_starts": 5_000     # Learn after collecting diverse experiences
+    },
+    
+    # Variant 1: Aggressive exploration - for discovering new strategies
+    {
+        "buffer_size": 200_000,      # Very large buffer for long-term patterns
+        "learning_rate": 5e-4,       # Higher learning rate
+        "batch_size": 128,           # Smaller batch for more frequent updates
+        "tau": 0.01,                 # Faster target updates
+        "gamma": 0.99,
+        "policy_delay": 2,
+        "target_policy_noise": 0.3,  # More noise for exploration
+        "target_noise_clip": 0.6,
+        "learning_starts": 2_000     # Start learning earlier
+    },
+    
+    # Variant 2: Large batch, stable updates - for high-quality gradients
+    {
+        "buffer_size": 150_000,
+        "learning_rate": 1e-4,       # Lower LR for stability
+        "batch_size": 512,           # Very large batch
+        "tau": 0.005,
+        "gamma": 0.99,
+        "policy_delay": 3,           # More delayed updates for stability
+        "target_policy_noise": 0.15, # Less noise with large batches
+        "target_noise_clip": 0.4,
+        "learning_starts": 10_000    # Collect more data before learning
+    },
+    
+    # Variant 3: High-frequency trading focus - quick adaptation
+    {
+        "buffer_size": 50_000,       # Smaller buffer for recent patterns
+        "learning_rate": 3e-4,
+        "batch_size": 64,            # Small batch for quick updates
+        "tau": 0.02,                 # Fast target network updates
+        "gamma": 0.98,               # Slightly lower discount (short-term focus)
+        "policy_delay": 2,
+        "target_policy_noise": 0.2,
+        "target_noise_clip": 0.5,
+        "learning_starts": 1_000
+    },
+    
+    # Variant 4: Sharpe ratio optimized - financial metrics focus
+    {
+        "buffer_size": 100_000,
+        "learning_rate": 2e-4,       # Moderate learning rate
+        "batch_size": 256,
+        "tau": 0.008,                # Balanced target updates
+        "gamma": 0.995,              # Higher discount for long-term rewards
+        "policy_delay": 2,
+        "target_policy_noise": 0.1,  # Low noise for consistent policies
+        "target_noise_clip": 0.3,
+        "learning_starts": 7_000     # Balanced warmup period
+    }
+]
 
 def get_rl_model_params(model_name: str) -> Dict:
     """Returns parameters for the given RL model name."""
@@ -212,43 +323,94 @@ def get_rl_model_params(model_name: str) -> Dict:
         "ppo": param_grid_ppo,
         # "a2c": param_grid_a2c,
         # "sac": param_grid_sac,
-        "ddpg": param_grid_ddpg
-        # "td3": param_grid_td3
+        "ddpg": param_grid_ddpg,
+        "td3": param_grid_td3
     }
     return params.get(model_name.lower(), {})
 
-def get_policy_kwargs_grid(policy_class) -> list:
-    """Returns policy kwargs grid for the given policy class."""
-    policy_kwargs_grids = {
-        CustomCNNLSTMPolicy: [
-            {
-                "cnn_filters": [32, 64],
-                "cnn_kernel_sizes": [3, 3],
-                "cnn_dropout": 0.1,
-                "lstm_hidden_size": 64,
-                "lstm_num_layers": 1,
-                "lstm_dropout": 0.0,
-                "net_arch": [64, 64],
-                "activation_fn": torch.nn.ReLU
-            }
-        ],
-        CustomCNNPolicy: [
-            {                      # CNN-specific parameters
+def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
+    """
+    Returns policy kwargs grid for the given policy class and model.
+    
+    Args:
+        policy_class: The policy class (from PolicyRegistry)
+        model_name: Name of the RL algorithm (e.g., 'ppo', 'ddpg')
+        
+    Returns:
+        List of policy kwargs dictionaries to try
+    """
+    # Extract the feature extractor name from policy class name
+    policy_name = policy_class.__name__
+    
+    # Common policy kwargs that work for all models
+    common_cnn_lstm_kwargs = {
+        "features_extractor_kwargs": {
+            "cnn_filters": [32, 64],
+            "cnn_kernel_sizes": [3, 3],
+            "cnn_dropout": 0.1,
+            "lstm_hidden_size": 64,
+            "lstm_num_layers": 1,
+            "lstm_dropout": 0.0
+        },
+        "net_arch": [64, 64],
+        "activation_fn": torch.nn.ReLU
+    }
+    
+    common_cnn_kwargs = {
+        "features_extractor_kwargs": {
             "num_filters": [32, 64],
             "kernel_sizes": [3, 3],
             "dropout": 0.1,
-            "net_arch": [64, 64],
-            "activation_fn": torch.nn.ReLU
-            }
-        ],
-        CustomLSTMPolicy: [
-            # TODO: Add LSTM-specific policy kwargs grid
-        ],
-        CustomTransformerPolicy: [
-            # TODO: Add Transformer-specific policy kwargs grid
-        ]
+            "output_dim": 128
+        },
+        "net_arch": [64, 64],
+        "activation_fn": torch.nn.ReLU
     }
-    return policy_kwargs_grids.get(policy_class, [{}])
+    
+    common_lstm_kwargs = {
+        "features_extractor_kwargs": {
+            "lstm_hidden_size": 128,
+            "num_layers": 2,
+            "dropout": 0.1
+        },
+        "net_arch": [64, 64],
+        "activation_fn": torch.nn.ReLU
+    }
+    
+    common_transformer_kwargs = {
+        "features_extractor_kwargs": {
+            "embed_dim": 128,
+            "num_heads": 8,
+            "num_layers": 2,
+            "dropout": 0.1
+        },
+        "net_arch": [64, 64],
+        "activation_fn": torch.nn.ReLU
+    }
+    
+    # Model-specific adjustments for off-policy algorithms
+    if model_name.lower() in ['ddpg', 'td3', 'sac']:
+        # Off-policy algorithms might need different architectures
+        if 'CNNLSTM' in policy_name:
+            return [{**common_cnn_lstm_kwargs, "net_arch": [256, 256]}]
+        elif 'CNN' in policy_name:
+            return [{**common_cnn_kwargs, "net_arch": [256, 256]}]
+        elif 'LSTM' in policy_name:
+            return [{**common_lstm_kwargs, "net_arch": [256, 256]}]
+        elif 'Transformer' in policy_name:
+            return [{**common_transformer_kwargs, "net_arch": [256, 256]}]
+    
+    # Default for on-policy (PPO, A2C)
+    if 'CNNLSTM' in policy_name:
+        return [common_cnn_lstm_kwargs]
+    elif 'CNN' in policy_name:
+        return [common_cnn_kwargs]
+    elif 'LSTM' in policy_name:
+        return [common_lstm_kwargs]
+    elif 'Transformer' in policy_name:
+        return [common_transformer_kwargs]
+    
+    return [{}]
 
 
 if ENV_TYPE == 'portfolio':
@@ -280,7 +442,7 @@ print(type(env_eval))
 agent = DRLAgent(env = env_train)
 
 params = get_rl_model_params(model)
-policy_kwargs = get_policy_kwargs_grid(policy)
+policy_kwargs = get_policy_kwargs_grid(policy, model)  # Pass model name as second argument
 # 8) Run search_best_hparams
 best_params, best_model = agent.search_best_hparams(
     model_name=model,
@@ -315,6 +477,19 @@ np.random.seed(seed)
 torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed) 
 
+# Create results subfolder based on configuration
+reward_type = env_kwargs.get('reward_type', 'default')
+sequence_length = env_kwargs.get('sequence_length', 1)
+results_subfolder = create_results_subfolder(
+    model_name=model,
+    feature_extractor=feature_extractor,
+    env_type=ENV_TYPE,
+    reward_type=reward_type,
+    sequence_length=sequence_length
+)
+
+print(f"\nResults will be saved to: {results_subfolder}\n")
+
 df_res, df_account_all, df_actions_all = agent.walk_forward_final_vs_checkpoint(
     df=df,
     unique_trade_dates=unique_dates,
@@ -335,16 +510,16 @@ df_res, df_account_all, df_actions_all = agent.walk_forward_final_vs_checkpoint(
 
 print("Walk-Forward Results Summary:")
 print(df_res)
-df_res.to_csv(f'./results/walkforward_results_{ENV_TYPE}_{model}_{seed}.csv')
+df_res.to_csv(os.path.join(results_subfolder, f'walkforward_results_seed{seed}.csv'))
 print("Account Value Memory Over All Trading Windows:")
 print(df_account_all.head())
-df_account_all.to_csv(f'./results/walkforward_account_value_{ENV_TYPE}_{model}_{seed}.csv')
+df_account_all.to_csv(os.path.join(results_subfolder, f'walkforward_account_value_seed{seed}.csv'))
 print("Actions Memory Over All Trading Windows:")
 print(df_actions_all.head())
-df_actions_all.to_csv(f'./results/walkforward_actions_{ENV_TYPE}_{model}_{seed}.csv')
+df_actions_all.to_csv(os.path.join(results_subfolder, f'walkforward_actions_seed{seed}.csv'))
 perf_stats_all = backtest_stats(account_value=df_account_all)
 perf_stats_all = pd.DataFrame(perf_stats_all)
-perf_stats_all.to_csv(f'./results/walkforward_perf_stats_{ENV_TYPE}_{model}_{seed}.csv')
+perf_stats_all.to_csv(os.path.join(results_subfolder, f'walkforward_perf_stats_seed{seed}.csv'))
 
 
 # # model with CNN + LSTM policy
