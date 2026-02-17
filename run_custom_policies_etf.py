@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from typing import Dict
 import datetime
 import os
+import json
 
 from finrl import config
 from finrl import config_tickers
@@ -14,6 +15,8 @@ from finrl.meta.preprocessor.preprocessors import FeatureEngineer, data_split
 from finrl.meta.env_portfolio_allocation.env_portfolio import StockPortfolioEnv
 from finrl.meta.env_portfolio_allocation.env_portfolio_sequence import StockPortfolioSequenceEnv
 from finrl.meta.env_stock_trading.env_stocktrading_sequence import StockTradingSequenceEnv
+# Import the new MLP environment for benchmarking
+from env_portfolio_mlp import StockPortfolioMLPEnv
 from finrl.agents.stablebaselines3.models import (
     DRLAgent, 
     get_cnn_policy,
@@ -30,7 +33,7 @@ from finrl.meta.data_processors.processor_yahoofinance import YahooFinanceProces
 from pyfolio import timeseries
 sys.path.append("../FinRL-Library")
 
-TOTAL_TIMESTEPS = 50000
+TOTAL_TIMESTEPS = 100000
 
 # ============================================================================
 # FLEXIBLE POLICY SELECTION USING REGISTRY PATTERN
@@ -38,24 +41,48 @@ TOTAL_TIMESTEPS = 50000
 # Now you can easily switch between different RL algorithms and feature extractors!
 # 
 # Supported Models: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
-# Supported Feature Extractors: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+# Supported Feature Extractors: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM', 'MLP'
 #
 # Examples:
 #   - CNN with PPO:         model='ppo',  feature_extractor='CustomCNN'
 #   - LSTM with DDPG:       model='ddpg', feature_extractor='CustomLSTM'
 #   - Transformer with SAC: model='sac',  feature_extractor='CustomTransformer'
 #   - CNN-LSTM with TD3:    model='td3',  feature_extractor='CustomCNNLSTM'
+#   - MLP with PPO:         model='ppo',  feature_extractor='MLP'  # Benchmark!
 # ============================================================================
 
-model = 'ddpg'  # Choose: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
-feature_extractor = 'CustomCNN'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+# ============================================================================
+# ENVIRONMENT SELECTION: Sequence Models vs Standard MLP
+# ============================================================================
+# Set USE_SEQUENCE_ENV to control which environment type to use:
+#   - True:  Use sequence environments (LSTM, CNN, Transformer, CNN-LSTM)
+#   - False: Use standard MLP environment (single-timestep baseline)
+#
+# This allows fair benchmarking between temporal and non-temporal models!
+# ============================================================================
 
-# Get the policy dynamically from the registry
-policy = PolicyRegistry.get_policy(feature_extractor, model)
-print(f"\n{'='*60}")
-print(f"Using policy: {policy.__name__}")
-print(f"Model: {model.upper()}, Feature Extractor: {feature_extractor}")
-print(f"{'='*60}\n")
+USE_SEQUENCE_ENV = True  # Set to False for MLP baseline benchmark
+
+model = 'ppo'  # Choose: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
+
+if USE_SEQUENCE_ENV:
+    feature_extractor = 'CustomCNNLSTM'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+    policy = PolicyRegistry.get_policy(feature_extractor, model)
+    print(f"\n{'='*60}")
+    print(f"🔬 SEQUENCE MODEL MODE")
+    print(f"Using policy: {policy.__name__}")
+    print(f"Model: {model.upper()}, Feature Extractor: {feature_extractor}")
+    print(f"Environment: Sequence-aware (temporal patterns)")
+    print(f"{'='*60}\n")
+else:
+    feature_extractor = 'MLP'  # Standard MLP for baseline
+    policy = "MlpPolicy"  # Use SB3's built-in MLP policy
+    print(f"\n{'='*60}")
+    print(f"📊 MLP BASELINE MODE")
+    print(f"Using policy: MlpPolicy (Standard SB3)")
+    print(f"Model: {model.upper()}, Feature Extractor: {feature_extractor}")
+    print(f"Environment: Single-timestep (spatial patterns only)")
+    print(f"{'='*60}\n")
 
 ENV_TYPE = 'portfolio'  # NEW: Choose 'portfolio' or 'trading'
 
@@ -66,16 +93,19 @@ def create_results_subfolder(model_name: str, feature_extractor: str, env_type: 
     
     Args:
         model_name: Name of the RL algorithm (e.g., 'ppo', 'ddpg')
-        feature_extractor: Feature extractor name (e.g., 'CustomCNN')
+        feature_extractor: Feature extractor name (e.g., 'CustomCNN', 'MLP')
         env_type: Environment type ('portfolio' or 'trading')
         reward_type: Reward type (e.g., 'dsr', 'pnl')
-        sequence_length: Sequence length for temporal models
+        sequence_length: Sequence length for temporal models (or 1 for MLP)
         
     Returns:
         Path to the results subfolder
     """
+    # Add prefix to distinguish sequence vs MLP environments
+    env_prefix = "seq" if USE_SEQUENCE_ENV else "mlp"
+    
     # Create descriptive folder name
-    folder_name = f"{model_name}_{feature_extractor}_{env_type}_reward_{reward_type}_seq{sequence_length}"
+    folder_name = f"{env_prefix}_{model_name}_{feature_extractor}_{env_type}_reward_{reward_type}_seq{sequence_length}"
     results_path = os.path.join(config.RESULTS_DIR, folder_name)
     
     # Create the directory if it doesn't exist
@@ -148,13 +178,33 @@ print(f"Stock Dimension: {stock_dimension}, State Space: {state_space}")
 
 # 4) Environment constructor function
 def make_env(the_df, env_type='portfolio', **kwargs):
-    """Create environment based on type selection."""
-    if env_type == 'portfolio':
-        return StockPortfolioSequenceEnv(df=the_df, **kwargs)
-    elif env_type == 'trading':
-        return StockTradingSequenceEnv(df=the_df, **kwargs)
+    """
+    Create environment based on type selection and USE_SEQUENCE_ENV flag.
+    
+    Args:
+        the_df: DataFrame with stock data
+        env_type: 'portfolio' or 'trading'
+        **kwargs: Environment-specific kwargs
+        
+    Returns:
+        Environment instance (sequence or MLP based on USE_SEQUENCE_ENV)
+    """
+    if USE_SEQUENCE_ENV:
+        # Use sequence-aware environments
+        if env_type == 'portfolio':
+            return StockPortfolioSequenceEnv(df=the_df, **kwargs)
+        elif env_type == 'trading':
+            return StockTradingSequenceEnv(df=the_df, **kwargs)
     else:
-        raise ValueError(f"Unknown environment type: {env_type}")
+        # Use standard single-timestep environment
+        if env_type == 'portfolio':
+            # Remove sequence-specific kwargs for MLP environment
+            mlp_kwargs = {k: v for k, v in kwargs.items() 
+                         if k not in ['sequence_length', 'flatten_observations']}
+            return StockPortfolioMLPEnv(df=the_df, **mlp_kwargs)
+        # Add standard trading env if needed
+    
+    raise ValueError(f"Unknown environment type: {env_type}")
 
 if ENV_TYPE == 'portfolio':
     env_kwargs = {
@@ -166,10 +216,14 @@ if ENV_TYPE == 'portfolio':
         # "tech_indicator_list": [],
         "action_space": stock_dimension, 
         "reward_scaling": 1,
-        "sequence_length": 20,
         "macro_df": macro_df,
-        "reward_type": "dsr" # Use Differential Sharpe Ratio reward
+        "reward_type": "pnl"  # Use Log Return reward with log_return or dsr for differential Sharpe ratio or pnl
     }
+    
+    # Add sequence-specific kwargs only if using sequence environment
+    if USE_SEQUENCE_ENV:
+        env_kwargs["sequence_length"] = 20
+        env_kwargs["flatten_observations"] = False  # Keep 2D for sequence models
 elif ENV_TYPE == 'trading':
     env_kwargs = {
         "hmax": 100,
@@ -183,20 +237,71 @@ elif ENV_TYPE == 'trading':
         #"tech_indicator_list": [],
         "action_space": stock_dimension,
         "reward_scaling": 1, # change for pnl to 1e-4,
-        "sequence_length": 20,
         "macro_df": macro_df,
         "reward_type": "dsr",  # Use Differential Sharpe Ratio reward
         "sharpe_window": 20       # Optional: Adjust the rolling window
     }
     
+    # Add sequence-specific kwargs only if using sequence environment
+    if USE_SEQUENCE_ENV:
+        env_kwargs["sequence_length"] = 20
+    
 # 7) Define a small hyperparam grid
 param_grid_ppo = [
-    {"learning_rate": 3e-4, "n_steps": 1024},
-    {"learning_rate": 1e-4, "n_steps": 2048},
-    {"ent_coef":0.01, "n_steps": 2048, "learning_rate": 0.00025,"batch_size": 128},
-    {"ent_coef": 0.005},
-    # New set for Sharpe Ratio: longer buffer, lower learning rate, more exploration
-    {"learning_rate": 5e-5, "n_steps": 4096, "ent_coef": 0.01, "batch_size": 256}
+    # 1. Baseline (SB3 defaults)
+    {
+        "learning_rate": 3e-4,
+        "n_steps": 2048,
+        "batch_size": 64,
+        "n_epochs": 10,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "ent_coef": 0.0
+    },
+    
+    # 2. Exploration (help escape static allocations)
+    {
+        "learning_rate": 3e-4,
+        "n_steps": 2048,
+        "batch_size": 128,
+        "n_epochs": 10,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "ent_coef": 0.01  # ← Key for avoiding static actions
+    },
+    
+    # 3. Conservative (stable Sharpe)
+    {
+        "learning_rate": 1e-4,
+        "n_steps": 2048,
+        "batch_size": 64,
+        "n_epochs": 15,
+        "gamma": 0.995,    # ← Long-term focus for log returns
+        "gae_lambda": 0.98,
+        "ent_coef": 0.005
+    },
+    
+    # 4. Quick adaptation (market regime changes)
+    {
+        "learning_rate": 5e-4,
+        "n_steps": 1024,   # ← Shorter rollouts for responsiveness
+        "batch_size": 128,
+        "n_epochs": 10,
+        "gamma": 0.98,     # ← Short-term for quick rebalancing
+        "gae_lambda": 0.90,
+        "ent_coef": 0.01
+    },
+    
+    # 5. Large batch (stable gradients with log returns)
+    {
+        "learning_rate": 2e-4,
+        "n_steps": 2048,
+        "batch_size": 256,  # ← Large batch for smooth learning
+        "n_epochs": 10,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "ent_coef": 0.01
+    }
 ]
 param_grid_ddpg = [
     { # Variant 0: from the repo
@@ -333,22 +438,33 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     Returns policy kwargs grid for the given policy class and model.
     
     Args:
-        policy_class: The policy class (from PolicyRegistry)
+        policy_class: The policy class (from PolicyRegistry) or string "MlpPolicy"
         model_name: Name of the RL algorithm (e.g., 'ppo', 'ddpg')
         
     Returns:
         List of policy kwargs dictionaries to try
     """
+    # For standard MLP, use same network architecture as sequence models for fair comparison
+    if not USE_SEQUENCE_ENV or policy_class == "MlpPolicy":
+        # Match the architecture used by sequence models
+        if model_name.lower() in ['ddpg', 'td3', 'sac']:
+            # Off-policy algorithms: use [256, 128] - gradual compression
+            return [{"net_arch": [256, 128]}]
+        else:
+            # On-policy algorithms (PPO, A2C): use default or smaller architecture
+            return [{}]
+    
     # Extract the feature extractor name from policy class name
     policy_name = policy_class.__name__
     
     # Common policy kwargs that work for all models
+    # Increased feature extractor outputs to 256 for better representation capacity
     common_cnn_lstm_kwargs = {
         "features_extractor_kwargs": {
-            "cnn_filters": [32, 64],
+            "cnn_filters": [64, 128],  # Increased from [32, 64]
             "cnn_kernel_sizes": [3, 3],
             "cnn_dropout": 0.1,
-            "lstm_hidden_size": 64,
+            "lstm_hidden_size": 128,  # Increased from 64
             "lstm_num_layers": 1,
             "lstm_dropout": 0.0
         },
@@ -358,10 +474,10 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     
     common_cnn_kwargs = {
         "features_extractor_kwargs": {
-            "num_filters": [32, 64],
+            "num_filters": [64, 128],  # Increased from [32, 64]
             "kernel_sizes": [3, 3],
             "dropout": 0.1,
-            "output_dim": 128
+            "output_dim": 256  # Increased from 128
         },
         "net_arch": [64, 64],
         "activation_fn": torch.nn.ReLU
@@ -369,7 +485,7 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     
     common_lstm_kwargs = {
         "features_extractor_kwargs": {
-            "lstm_hidden_size": 128,
+            "lstm_hidden_size": 256,  # Increased from 128
             "num_layers": 2,
             "dropout": 0.1
         },
@@ -379,7 +495,7 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     
     common_transformer_kwargs = {
         "features_extractor_kwargs": {
-            "embed_dim": 128,
+            "embed_dim": 256,  # Increased from 128
             "num_heads": 8,
             "num_layers": 2,
             "dropout": 0.1
@@ -390,15 +506,15 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     
     # Model-specific adjustments for off-policy algorithms
     if model_name.lower() in ['ddpg', 'td3', 'sac']:
-        # Off-policy algorithms might need different architectures
+        # Off-policy algorithms: use [256, 128] for gradual compression
         if 'CNNLSTM' in policy_name:
-            return [{**common_cnn_lstm_kwargs, "net_arch": [256, 256]}]
+            return [{**common_cnn_lstm_kwargs, "net_arch": [256, 128]}]
         elif 'CNN' in policy_name:
-            return [{**common_cnn_kwargs, "net_arch": [256, 256]}]
+            return [{**common_cnn_kwargs, "net_arch": [256, 128]}]
         elif 'LSTM' in policy_name:
-            return [{**common_lstm_kwargs, "net_arch": [256, 256]}]
+            return [{**common_lstm_kwargs, "net_arch": [256, 128]}]
         elif 'Transformer' in policy_name:
-            return [{**common_transformer_kwargs, "net_arch": [256, 256]}]
+            return [{**common_transformer_kwargs, "net_arch": [256, 128]}]
     
     # Default for on-policy (PPO, A2C)
     if 'CNNLSTM' in policy_name:
@@ -414,11 +530,21 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
 
 
 if ENV_TYPE == 'portfolio':
-    e_train_gym = StockPortfolioSequenceEnv(df=train, **env_kwargs)
-    e_eval_gym = StockPortfolioSequenceEnv(df=val, **env_kwargs)
+    if USE_SEQUENCE_ENV:
+        e_train_gym = StockPortfolioSequenceEnv(df=train, **env_kwargs)
+        e_eval_gym = StockPortfolioSequenceEnv(df=val, **env_kwargs)
+    else:
+        # Use MLP environment (remove sequence-specific kwargs)
+        mlp_kwargs = {k: v for k, v in env_kwargs.items() 
+                     if k not in ['sequence_length', 'flatten_observations']}
+        e_train_gym = StockPortfolioMLPEnv(df=train, **mlp_kwargs)
+        e_eval_gym = StockPortfolioMLPEnv(df=val, **mlp_kwargs)
 elif ENV_TYPE == 'trading':
-    e_train_gym = StockTradingSequenceEnv(df=train, **env_kwargs)
-    e_eval_gym = StockTradingSequenceEnv(df=val, **env_kwargs)
+    if USE_SEQUENCE_ENV:
+        e_train_gym = StockTradingSequenceEnv(df=train, **env_kwargs)
+        e_eval_gym = StockTradingSequenceEnv(df=val, **env_kwargs)
+    else:
+        raise NotImplementedError("MLP environment for trading not yet implemented")
 
 env_train, _ = e_train_gym.get_sb_env()
 print(type(env_train))
@@ -441,43 +567,7 @@ print(type(env_eval))
 # initialize
 agent = DRLAgent(env = env_train)
 
-params = get_rl_model_params(model)
-policy_kwargs = get_policy_kwargs_grid(policy, model)  # Pass model name as second argument
-# 8) Run search_best_hparams
-best_params, best_model = agent.search_best_hparams(
-    model_name=model,
-    train_df=train,
-    val_df=val,
-    param_grid=params,
-    policy=policy,
-    policy_kwargs_grid=policy_kwargs,
-    total_timesteps=TOTAL_TIMESTEPS,
-    env_constructor=lambda the_df, **kwargs: make_env(the_df, ENV_TYPE, **kwargs),  # Updated
-    eval_freq=5_000,
-    best_model_save_path="./best_hparam_search",
-    **env_kwargs
-)
-
-
-print("Hyperparam Search Results:")
-print("Best Params: ", best_params)
-print("We have a best_model trained with these params")
-
-# 9) Once hyperparams are found, proceed with walk-forward:
-start_date = "2020-10-01"
-end_date   = "2024-12-31"
-
-#   We'll choose a 63-day validation window each iteration, 
-#   then a 63-day trading window (rebalance_window).
-rebalance_window = 63 
-val_window       = 63 
-
-seed = 1
-np.random.seed(seed)
-torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed) 
-
-# Create results subfolder based on configuration
+# Create results subfolder BEFORE hyperparameter search to save/load params
 reward_type = env_kwargs.get('reward_type', 'default')
 sequence_length = env_kwargs.get('sequence_length', 1)
 results_subfolder = create_results_subfolder(
@@ -490,36 +580,113 @@ results_subfolder = create_results_subfolder(
 
 print(f"\nResults will be saved to: {results_subfolder}\n")
 
-df_res, df_account_all, df_actions_all = agent.walk_forward_final_vs_checkpoint(
-    df=df,
-    unique_trade_dates=unique_dates,
-    start_date=start_date,
-    end_date=end_date,
-    model_name=model,
-    fixed_params=best_params,
-    rebalance_window=rebalance_window,
-    val_window=val_window,
-    total_timesteps=TOTAL_TIMESTEPS,
-    env_constructor=lambda the_df, **kwargs: make_env(the_df, ENV_TYPE, **kwargs),  # Updated
-    eval_freq=5000,
-    best_model_prefix="./walkforward_best_model",
-    seed=seed,
-    **env_kwargs
-)
+# Check if best params already exist
+best_params_file = os.path.join(results_subfolder, 'best_hyperparams.json')
+
+if os.path.exists(best_params_file):
+    print(f"\n{'='*60}")
+    print("⚡ Loading cached hyperparameters (skipping grid search)")
+    print(f"{'='*60}\n")
+    
+    with open(best_params_file, 'r') as f:
+        best_params = json.load(f)
+    
+    print("Loaded Best Params: ", best_params)
+    
+    # Still need to train a model with these params for walk-forward
+    policy_kwargs = get_policy_kwargs_grid(policy, model)
+    best_model = agent.get_model(
+        model_name=model,
+        policy=policy,
+        policy_kwargs=policy_kwargs[0] if policy_kwargs else {},
+        **best_params
+    )
+    
+else:
+    print(f"\n{'='*60}")
+    print("🔍 Running hyperparameter grid search (first time)")
+    print(f"{'='*60}\n")
+    
+    params = get_rl_model_params(model)
+    policy_kwargs = get_policy_kwargs_grid(policy, model)  # Pass model name as second argument
+    
+    # 8) Run search_best_hparams
+    best_params, best_model = agent.search_best_hparams(
+        model_name=model,
+        train_df=train,
+        val_df=val,
+        param_grid=params,
+        policy=policy,
+        policy_kwargs_grid=policy_kwargs,
+        total_timesteps=TOTAL_TIMESTEPS,
+        env_constructor=lambda the_df, **kwargs: make_env(the_df, ENV_TYPE, **kwargs),  # Updated
+        eval_freq=5_000,
+        best_model_save_path="./best_hparam_search",
+        **env_kwargs
+    )
+    
+    print("\nHyperparam Search Results:")
+    print("Best Params: ", best_params)
+    
+    # Save best params to file for future runs
+    with open(best_params_file, 'w') as f:
+        json.dump(best_params, f, indent=2)
+    
+    print(f"\n✅ Best hyperparameters saved to: {best_params_file}\n")
+
+print("We have a best_model trained with these params")
+
+# 9) Once hyperparams are found, proceed with walk-forward:
+start_date = "2020-10-01"
+end_date   = "2024-12-31"
+
+#   We'll choose a 63-day validation window each iteration, 
+#   then a 63-day trading window (rebalance_window).
+rebalance_window = 63 
+val_window       = 63 
+
+seeds = range(1,21)
+for seed in seeds:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) 
+
+    # Results subfolder already created before hyperparameter search
+    print(f"\n{'='*60}")
+    print(f"Running walk-forward validation with seed {seed}")
+    print(f"Results directory: {results_subfolder}")
+    print(f"{'='*60}\n")
+
+    df_res, df_account_all, df_actions_all = agent.walk_forward_final_vs_checkpoint(
+        df=df,
+        unique_trade_dates=unique_dates,
+        start_date=start_date,
+        end_date=end_date,
+        model_name=model,
+        fixed_params=best_params,
+        rebalance_window=rebalance_window,
+        val_window=val_window,
+        total_timesteps=TOTAL_TIMESTEPS,
+        env_constructor=lambda the_df, **kwargs: make_env(the_df, ENV_TYPE, **kwargs),  # Updated
+        eval_freq=5000,
+        best_model_prefix="./walkforward_best_model",
+        seed=seed,
+        **env_kwargs
+    )
 
 
-print("Walk-Forward Results Summary:")
-print(df_res)
-df_res.to_csv(os.path.join(results_subfolder, f'walkforward_results_seed{seed}.csv'))
-print("Account Value Memory Over All Trading Windows:")
-print(df_account_all.head())
-df_account_all.to_csv(os.path.join(results_subfolder, f'walkforward_account_value_seed{seed}.csv'))
-print("Actions Memory Over All Trading Windows:")
-print(df_actions_all.head())
-df_actions_all.to_csv(os.path.join(results_subfolder, f'walkforward_actions_seed{seed}.csv'))
-perf_stats_all = backtest_stats(account_value=df_account_all)
-perf_stats_all = pd.DataFrame(perf_stats_all)
-perf_stats_all.to_csv(os.path.join(results_subfolder, f'walkforward_perf_stats_seed{seed}.csv'))
+    print("Walk-Forward Results Summary:")
+    print(df_res)
+    df_res.to_csv(os.path.join(results_subfolder, f'walkforward_results_seed{seed}.csv'))
+    print("Account Value Memory Over All Trading Windows:")
+    print(df_account_all.head())
+    df_account_all.to_csv(os.path.join(results_subfolder, f'walkforward_account_value_seed{seed}.csv'))
+    print("Actions Memory Over All Trading Windows:")
+    print(df_actions_all.head())
+    df_actions_all.to_csv(os.path.join(results_subfolder, f'walkforward_actions_seed{seed}.csv'))
+    perf_stats_all = backtest_stats(account_value=df_account_all)
+    perf_stats_all = pd.DataFrame(perf_stats_all)
+    perf_stats_all.to_csv(os.path.join(results_subfolder, f'walkforward_perf_stats_seed{seed}.csv'))
 
 
 # # model with CNN + LSTM policy
