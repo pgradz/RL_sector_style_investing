@@ -33,7 +33,7 @@ from finrl.meta.data_processors.processor_yahoofinance import YahooFinanceProces
 from pyfolio import timeseries
 sys.path.append("../FinRL-Library")
 
-TOTAL_TIMESTEPS = 100000
+TOTAL_TIMESTEPS = 100000  # TODO: increase to 100k for final runs after testing
 
 # ============================================================================
 # FLEXIBLE POLICY SELECTION USING REGISTRY PATTERN
@@ -66,7 +66,7 @@ USE_SEQUENCE_ENV = True  # Set to False for MLP baseline benchmark
 model = 'ppo'  # Choose: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
 
 if USE_SEQUENCE_ENV:
-    feature_extractor = 'CustomTransformer'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+    feature_extractor = 'CustomCNN'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
     policy = PolicyRegistry.get_policy(feature_extractor, model)
     print(f"\n{'='*60}")
     print(f"🔬 SEQUENCE MODEL MODE")
@@ -217,13 +217,14 @@ if ENV_TYPE == 'portfolio':
         "action_space": stock_dimension, 
         "reward_scaling": 1,
         "macro_df": macro_df,
-        "reward_type": "dsr"  # Use Log Return reward with log_return or dsr for differential Sharpe ratio or pnl
+        "reward_type": "log_return"  #  options: "log_return", "pnl", "dsr" (differential sharpe ratio), active_return
     }
     
     # Add sequence-specific kwargs only if using sequence environment
     if USE_SEQUENCE_ENV:
         env_kwargs["sequence_length"] = 20
         env_kwargs["flatten_observations"] = False  # Keep 2D for sequence models
+        env_kwargs["random_start"] = True  # RC6: Training diversity via random episode starts
 elif ENV_TYPE == 'trading':
     env_kwargs = {
         "hmax": 100,
@@ -248,59 +249,74 @@ elif ENV_TYPE == 'trading':
     
 # 7) Define a small hyperparam grid
 param_grid_ppo = [
-    # 1. Baseline (SB3 defaults)
+    # 1. High exploration (RC4: prevent policy collapse)
     {
         "learning_rate": 3e-4,
-        "n_steps": 2048,
+        "n_steps": 512,
         "batch_size": 64,
-        "n_epochs": 10,
+        "n_epochs": 4,           # RC4: fewer epochs to prevent over-fitting each rollout
         "gamma": 0.99,
         "gae_lambda": 0.95,
-        "ent_coef": 0.0
+        "ent_coef": 0.05,         # RC4: strong entropy to maintain exploration
+        "clip_range": 0.1,        # RC4: tighter clipping for stable updates
+        "max_grad_norm": 0.5,     # RC4: gradient clipping
+        "vf_coef": 0.5,
     },
     
-    # 2. Exploration (help escape static allocations)
+    # 2. Maximum entropy exploration
     {
-        "learning_rate": 3e-4,
-        "n_steps": 2048,
+        "learning_rate": 2e-4,
+        "n_steps": 1024,
         "batch_size": 128,
-        "n_epochs": 10,
+        "n_epochs": 5,
         "gamma": 0.99,
         "gae_lambda": 0.95,
-        "ent_coef": 0.01  # ← Key for avoiding static actions
+        "ent_coef": 0.10,         # RC4: very high entropy for anti-collapse
+        "clip_range": 0.15,
+        "max_grad_norm": 0.5,
+        "vf_coef": 0.5,
     },
     
-    # 3. Conservative (stable Sharpe)
+    # 3. Conservative exploration
     {
         "learning_rate": 1e-4,
-        "n_steps": 2048,
+        "n_steps": 1024,
         "batch_size": 64,
-        "n_epochs": 15,
-        "gamma": 0.995,    # ← Long-term focus for log returns
+        "n_epochs": 3,            # RC4: minimal epochs
+        "gamma": 0.995,
         "gae_lambda": 0.98,
-        "ent_coef": 0.005
+        "ent_coef": 0.03,
+        "clip_range": 0.1,
+        "max_grad_norm": 0.3,
+        "vf_coef": 0.5,
     },
     
-    # 4. Quick adaptation (market regime changes)
+    # 4. Fast adaptation with strong exploration
     {
         "learning_rate": 5e-4,
-        "n_steps": 1024,   # ← Shorter rollouts for responsiveness
+        "n_steps": 512,
         "batch_size": 128,
-        "n_epochs": 10,
-        "gamma": 0.98,     # ← Short-term for quick rebalancing
+        "n_epochs": 4,
+        "gamma": 0.98,
         "gae_lambda": 0.90,
-        "ent_coef": 0.01
+        "ent_coef": 0.05,
+        "clip_range": 0.1,
+        "max_grad_norm": 0.5,
+        "vf_coef": 0.5,
     },
     
-    # 5. Large batch (stable gradients with log returns)
+    # 5. Large batch with moderate exploration
     {
         "learning_rate": 2e-4,
         "n_steps": 2048,
-        "batch_size": 256,  # ← Large batch for smooth learning
-        "n_epochs": 10,
+        "batch_size": 256,
+        "n_epochs": 4,
         "gamma": 0.99,
         "gae_lambda": 0.95,
-        "ent_coef": 0.01
+        "ent_coef": 0.05,
+        "clip_range": 0.15,
+        "max_grad_norm": 0.5,
+        "vf_coef": 0.5,
     }
 ]
 param_grid_ddpg = [
@@ -532,13 +548,19 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
 if ENV_TYPE == 'portfolio':
     if USE_SEQUENCE_ENV:
         e_train_gym = StockPortfolioSequenceEnv(df=train, **env_kwargs)
-        e_eval_gym = StockPortfolioSequenceEnv(df=val, **env_kwargs)
+        # Pass training normalization stats to eval env to prevent data leakage
+        norm_stats = e_train_gym.get_normalization_stats()
+        eval_kwargs = dict(**env_kwargs)
+        eval_kwargs['random_start'] = False  # Deterministic evaluation
+        e_eval_gym = StockPortfolioSequenceEnv(df=val, normalization_stats=norm_stats, **eval_kwargs)
     else:
         # Use MLP environment (remove sequence-specific kwargs)
         mlp_kwargs = {k: v for k, v in env_kwargs.items() 
                      if k not in ['sequence_length', 'flatten_observations']}
         e_train_gym = StockPortfolioMLPEnv(df=train, **mlp_kwargs)
-        e_eval_gym = StockPortfolioMLPEnv(df=val, **mlp_kwargs)
+        # Pass training normalization stats to eval env to prevent data leakage
+        norm_stats = e_train_gym.get_normalization_stats()
+        e_eval_gym = StockPortfolioMLPEnv(df=val, normalization_stats=norm_stats, **mlp_kwargs)
 elif ENV_TYPE == 'trading':
     if USE_SEQUENCE_ENV:
         e_train_gym = StockTradingSequenceEnv(df=train, **env_kwargs)
@@ -602,7 +624,7 @@ if os.path.exists(best_params_file):
         model_name=model,
         policy=policy,
         policy_kwargs=policy_kwargs[0] if policy_kwargs else {},
-        **best_params
+        model_kwargs=best_params
     )
     
 else:
