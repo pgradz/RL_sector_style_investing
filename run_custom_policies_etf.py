@@ -66,7 +66,7 @@ USE_SEQUENCE_ENV = True  # Set to False for MLP baseline benchmark
 model = 'ppo'  # Choose: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
 
 if USE_SEQUENCE_ENV:
-    feature_extractor = 'CustomCNNLSTM'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+    feature_extractor = 'CustomTransformer'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
     policy = PolicyRegistry.get_policy(feature_extractor, model)
     print(f"\n{'='*60}")
     print(f"🔬 SEQUENCE MODEL MODE")
@@ -217,7 +217,7 @@ if ENV_TYPE == 'portfolio':
         "action_space": stock_dimension, 
         "reward_scaling": 1,
         "macro_df": macro_df,
-        "reward_type": "pnl"  # Use Log Return reward with log_return or dsr for differential Sharpe ratio or pnl
+        "reward_type": "dsr"  # Use Log Return reward with log_return or dsr for differential Sharpe ratio or pnl
     }
     
     # Add sequence-specific kwargs only if using sequence environment
@@ -589,11 +589,14 @@ if os.path.exists(best_params_file):
     print(f"{'='*60}\n")
     
     with open(best_params_file, 'r') as f:
-        best_params = json.load(f)
+        saved_params = json.load(f)
+    
+    # Extract model_params from saved data
+    best_params = saved_params
     
     print("Loaded Best Params: ", best_params)
     
-    # Still need to train a model with these params for walk-forward
+    # Reconstruct policy and policy_kwargs from current configuration
     policy_kwargs = get_policy_kwargs_grid(policy, model)
     best_model = agent.get_model(
         model_name=model,
@@ -628,11 +631,19 @@ else:
     print("\nHyperparam Search Results:")
     print("Best Params: ", best_params)
     
+    # Extract only serializable model_params for saving
+    # best_params contains: {'model_params': {...}, 'policy': <class>, 'policy_kwargs': {...}}
+    # We only save model_params since policy/policy_kwargs are reconstructed from configuration
+    params_to_save = best_params.get('model_params', best_params)
+    
     # Save best params to file for future runs
     with open(best_params_file, 'w') as f:
-        json.dump(best_params, f, indent=2)
+        json.dump(params_to_save, f, indent=2)
     
     print(f"\n✅ Best hyperparameters saved to: {best_params_file}\n")
+    
+    # Update best_params to only contain model_params for walk_forward
+    best_params = params_to_save
 
 print("We have a best_model trained with these params")
 
