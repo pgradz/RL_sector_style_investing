@@ -155,6 +155,44 @@ fe = FeatureEngineer(
 
 df = fe.preprocess_data(df)
 
+# ---------------------------------------------------------------------------
+# Stationary Technical Indicators (pragmatic: transform FinRL defaults)
+# ---------------------------------------------------------------------------
+# FinRL's defaults include 4 non-stationary price-level features
+# (boll_ub, boll_lb, close_30_sma, close_60_sma) and MACD which scales
+# with price level.  Transform them into stationary, cross-asset-comparable
+# features while keeping rsi_30 and dx_30 as-is (already bounded/stationary).
+for tic in df['tic'].unique():
+    mask = df['tic'] == tic
+    close = df.loc[mask, 'close']
+
+    # Bollinger Band position: where close sits within the bands ∈ [0, 1]
+    bb_range = df.loc[mask, 'boll_ub'] - df.loc[mask, 'boll_lb']
+    df.loc[mask, 'bb_position'] = (
+        (close - df.loc[mask, 'boll_lb']) / bb_range.replace(0, np.nan)
+    )
+
+    # SMA disparity: % deviation from 30-day SMA (mean-reverting)
+    sma30 = df.loc[mask, 'close_30_sma']
+    df.loc[mask, 'sma_disparity'] = (close - sma30) / sma30.replace(0, np.nan)
+
+    # ATR ratio: 14-day ATR / close (normalised realised volatility)
+    high = df.loc[mask, 'high']
+    low = df.loc[mask, 'low']
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    df.loc[mask, 'atr_ratio'] = tr.rolling(14).mean() / close
+
+# Fill NaNs from rolling calculations with sensible defaults
+df['bb_position']   = df['bb_position'].fillna(0.5)
+df['sma_disparity'] = df['sma_disparity'].fillna(0.0)
+df['atr_ratio']     = df['atr_ratio'].fillna(0.0)
+
+# Final indicator set: 6 stationary features
+CUSTOM_INDICATORS = ['rsi_30', 'dx_30', 'macd', 'bb_position', 'sma_disparity', 'atr_ratio']
 
 # add covariance matrix as states
 df=df.sort_values(['date','tic'],ignore_index=True)
@@ -166,7 +204,7 @@ df = df.loc[df.date >= '2010-06-01'] # fred starts June 2010
 
 train = data_split(df, '2010-06-01','2021-01-01') # fred starts June 2010
 val = data_split(df, '2021-01-01','2022-01-01')
-trade = data_split(df,'2022-01-01', '2025-01-01')
+trade = data_split(df,'2022-01-01', '2026-01-01')
 
 stock_dimension = len(train.tic.unique())
 state_space = stock_dimension
@@ -212,8 +250,7 @@ if ENV_TYPE == 'portfolio':
         "initial_amount": 1000000, 
         "transaction_cost_pct": 0.001, 
         "stock_dim": stock_dimension, 
-        "tech_indicator_list": config.INDICATORS, 
-        # "tech_indicator_list": [],
+        "tech_indicator_list": CUSTOM_INDICATORS, 
         "action_space": stock_dimension, 
         "reward_scaling": 1,
         "macro_df": macro_df,
@@ -234,8 +271,7 @@ elif ENV_TYPE == 'trading':
         "sell_cost_pct": [0.001] * stock_dimension, # Required for trading env
         "stock_dim": stock_dimension,
         "state_space": stock_dimension,  # Required for trading env - it is not used. consider eliminating
-        "tech_indicator_list": config.INDICATORS,
-        #"tech_indicator_list": [],
+        "tech_indicator_list": CUSTOM_INDICATORS,
         "action_space": stock_dimension,
         "reward_scaling": 1, # change for pnl to 1e-4,
         "macro_df": macro_df,
@@ -670,8 +706,8 @@ else:
 print("We have a best_model trained with these params")
 
 # 9) Once hyperparams are found, proceed with walk-forward:
-start_date = "2020-10-01"
-end_date   = "2024-12-31"
+start_date = "2021-10-01"
+end_date   = "2025-12-31"
 
 #   We'll choose a 63-day validation window each iteration, 
 #   then a 63-day trading window (rebalance_window).
