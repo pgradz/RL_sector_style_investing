@@ -254,7 +254,12 @@ if ENV_TYPE == 'portfolio':
         "action_space": stock_dimension, 
         "reward_scaling": 1,
         "macro_df": macro_df,
-        "reward_type": "log_return"  #  options: "log_return", "pnl", "dsr" (differential sharpe ratio), active_return
+        "reward_type": "log_return",  #  options: "log_return", "pnl", "dsr" (differential sharpe ratio), active_return
+        "reward_transform": "ewma_zscore",  # unified scaling across reward types
+        "reward_beta": 0.01,
+        "reward_clip": 5.0,
+        "turnover_penalty_threshold": 0.20,  # Penalty-free daily turnover (~10% reallocation)
+        "turnover_penalty_coeff": 0.0,  # Main setting: rely on explicit transaction costs; test >0 only in ablations
     }
     
     # Add sequence-specific kwargs only if using sequence environment
@@ -586,9 +591,16 @@ if ENV_TYPE == 'portfolio':
         e_train_gym = StockPortfolioSequenceEnv(df=train, **env_kwargs)
         # Pass training normalization stats to eval env to prevent data leakage
         norm_stats = e_train_gym.get_normalization_stats()
+        reward_stats = e_train_gym.get_reward_stats()
         eval_kwargs = dict(**env_kwargs)
         eval_kwargs['random_start'] = False  # Deterministic evaluation
-        e_eval_gym = StockPortfolioSequenceEnv(df=val, normalization_stats=norm_stats, **eval_kwargs)
+        eval_kwargs['update_reward_stats'] = False  # freeze reward normalization stats during eval
+        e_eval_gym = StockPortfolioSequenceEnv(
+            df=val,
+            normalization_stats=norm_stats,
+            reward_stats=reward_stats,
+            **eval_kwargs
+        )
     else:
         # Use MLP environment (remove sequence-specific kwargs)
         mlp_kwargs = {k: v for k, v in env_kwargs.items() 
@@ -596,7 +608,16 @@ if ENV_TYPE == 'portfolio':
         e_train_gym = StockPortfolioMLPEnv(df=train, **mlp_kwargs)
         # Pass training normalization stats to eval env to prevent data leakage
         norm_stats = e_train_gym.get_normalization_stats()
-        e_eval_gym = StockPortfolioMLPEnv(df=val, normalization_stats=norm_stats, **mlp_kwargs)
+        reward_stats = e_train_gym.get_reward_stats()
+        eval_mlp_kwargs = dict(**mlp_kwargs)
+        eval_mlp_kwargs['update_reward_stats'] = False  # freeze reward normalization stats during eval
+        eval_mlp_kwargs['random_start'] = False
+        e_eval_gym = StockPortfolioMLPEnv(
+            df=val,
+            normalization_stats=norm_stats,
+            reward_stats=reward_stats,
+            **eval_mlp_kwargs
+        )
 elif ENV_TYPE == 'trading':
     if USE_SEQUENCE_ENV:
         e_train_gym = StockTradingSequenceEnv(df=train, **env_kwargs)
