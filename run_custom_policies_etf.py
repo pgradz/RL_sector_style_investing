@@ -254,12 +254,13 @@ if ENV_TYPE == 'portfolio':
         "action_space": stock_dimension, 
         "reward_scaling": 1,
         "macro_df": macro_df,
-        "reward_type": "log_return",  #  options: "log_return", "pnl", "dsr" (differential sharpe ratio), active_return
+        "reward_type": "dsr",  #  options: "log_return", "pnl", "dsr" (differential sharpe ratio), active_return
         "reward_transform": "ewma_zscore",  # unified scaling across reward types
         "reward_beta": 0.01,
         "reward_clip": 5.0,
-        "turnover_penalty_threshold": 0.20,  # Penalty-free daily turnover (~10% reallocation)
-        "turnover_penalty_coeff": 0.0,  # Main setting: rely on explicit transaction costs; test >0 only in ablations
+        "rebalancing_threshold": 0.10,  # Execution layer: 10% minimum turnover to execute rebalancing
+        "turnover_penalty_threshold": 0.20,  # Training layer: penalty-free daily turnover (~10% reallocation)
+        "turnover_penalty_coeff": 0.2,  # Training layer: gentle penalty (10-30% of raw reward for 30-50% turnover)
     }
     
     # Add sequence-specific kwargs only if using sequence environment
