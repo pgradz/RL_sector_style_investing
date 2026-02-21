@@ -258,9 +258,10 @@ if ENV_TYPE == 'portfolio':
         "reward_transform": "ewma_zscore",  # unified scaling across reward types
         "reward_beta": 0.01,
         "reward_clip": 5.0,
-        "rebalancing_threshold": 0.10,  # Execution layer: 10% minimum turnover to execute rebalancing
-        "turnover_penalty_threshold": 0.20,  # Training layer: penalty-free daily turnover (~10% reallocation)
-        "turnover_penalty_coeff": 0.2,  # Training layer: gentle penalty (10-30% of raw reward for 30-50% turnover)
+        "rebalancing_threshold": 0.1,  # Execution layer: 5% blocks noise trades, allows meaningful tilts
+        "turnover_penalty_threshold": 0.30,  # Not used (coeff=0)
+        "turnover_penalty_coeff": 0.0,  # DISABLED: Let policy learn sector bets from market feedback only
+        "action_mode": "residual",  # Zero action = hold current weights = zero turnover = zero TC (no tuning needed)
     }
     
     # Add sequence-specific kwargs only if using sequence environment
