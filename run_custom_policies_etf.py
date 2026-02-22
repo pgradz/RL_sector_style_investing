@@ -262,6 +262,8 @@ if ENV_TYPE == 'portfolio':
         "turnover_penalty_threshold": 0.30,  # Not used (coeff=0)
         "turnover_penalty_coeff": 0.0,  # DISABLED: Let policy learn sector bets from market feedback only
         "action_mode": "residual",  # Zero action = hold current weights = zero turnover = zero TC (no tuning needed)
+        "decision_interval": 5,  # Weekly trading: act every 5 days, hold between decisions (reduces TC structurally)
+        "randomize_interval_offset": True,  # Random phase offset in training for diversity
     }
     
     # Add sequence-specific kwargs only if using sequence environment
@@ -596,6 +598,7 @@ if ENV_TYPE == 'portfolio':
         reward_stats = e_train_gym.get_reward_stats()
         eval_kwargs = dict(**env_kwargs)
         eval_kwargs['random_start'] = False  # Deterministic evaluation
+        eval_kwargs['randomize_interval_offset'] = False  # Fixed phase in evaluation
         eval_kwargs['update_reward_stats'] = False  # freeze reward normalization stats during eval
         e_eval_gym = StockPortfolioSequenceEnv(
             df=val,
@@ -614,6 +617,7 @@ if ENV_TYPE == 'portfolio':
         eval_mlp_kwargs = dict(**mlp_kwargs)
         eval_mlp_kwargs['update_reward_stats'] = False  # freeze reward normalization stats during eval
         eval_mlp_kwargs['random_start'] = False
+        eval_mlp_kwargs['randomize_interval_offset'] = False  # Fixed phase in evaluation
         e_eval_gym = StockPortfolioMLPEnv(
             df=val,
             normalization_stats=norm_stats,
