@@ -66,7 +66,7 @@ USE_SEQUENCE_ENV = True  # Set to False for MLP baseline benchmark
 model = 'ppo'  # Choose: 'ppo', 'a2c', 'ddpg', 'td3', 'sac'
 
 if USE_SEQUENCE_ENV:
-    feature_extractor = 'CustomCNN'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
+    feature_extractor = 'CustomLSTM'  # Choose: 'CustomCNN', 'CustomLSTM', 'CustomTransformer', 'CustomCNNLSTM'
     policy = PolicyRegistry.get_policy(feature_extractor, model)
     print(f"\n{'='*60}")
     print(f"🔬 SEQUENCE MODEL MODE")
@@ -127,7 +127,8 @@ if not os.path.exists("./" + config.RESULTS_DIR):
 # df = pd.concat([train,trade])
 
 etf = pd.read_csv('datasets/sector_data_adj_close.csv',parse_dates=['date'])
-stocks = [ 'SPY', 'TLT', 'BIL', 'XLE', 'XLF', 'XLI', 'XLK','XLU', 'XLV', 'XLY', 'XLB', 'XLP']
+# stocks = [ 'SPY', 'TLT', 'BIL', 'XLE', 'XLF', 'XLI', 'XLK','XLU', 'XLV', 'XLY', 'XLB', 'XLP']
+stocks = [ 'XLE', 'XLF', 'XLI', 'XLK','XLU', 'XLV', 'XLY', 'XLB', 'XLP']
 df = etf.loc[etf['tic'].isin(stocks)]
 macro_indicators = ['DBC', 'DX-Y.NYB', 'GLD','^MOVE', '^TNX', '^VIX'] # 'BDRY' removed because of missing
 
@@ -263,7 +264,8 @@ if ENV_TYPE == 'portfolio':
         "turnover_penalty_coeff": 0.0,  # DISABLED: Let policy learn sector bets from market feedback only
         "action_mode": "residual",  # Zero action = hold current weights = zero turnover = zero TC (no tuning needed)
         "decision_interval": 5,  # Weekly trading: act every 5 days, hold between decisions (reduces TC structurally)
-        "randomize_interval_offset": True,  # Random phase offset in training for diversity
+        "randomize_interval_offset": True,  # Random phase offset in training for diversity,
+        "post_norm_tc_coeff": 0.0 # DISABLED: No explicit TC penalty in reward
     }
     
     # Add sequence-specific kwargs only if using sequence environment
@@ -535,10 +537,10 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     
     common_cnn_kwargs = {
         "features_extractor_kwargs": {
-            "num_filters": [64, 128],  # Increased from [32, 64]
+            "num_filters": [32, 64],   # iso-capacity: ~225K total vs CNN-LSTM ~203K
             "kernel_sizes": [3, 3],
             "dropout": 0.1,
-            "output_dim": 256  # Increased from 128
+            "output_dim": 128
         },
         "net_arch": [64, 64],
         "activation_fn": torch.nn.ReLU
@@ -546,7 +548,7 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     
     common_lstm_kwargs = {
         "features_extractor_kwargs": {
-            "lstm_hidden_size": 256,  # Increased from 128
+            "lstm_hidden_size": 128,   # iso-capacity: ~254K total vs CNN-LSTM ~203K
             "num_layers": 2,
             "dropout": 0.1
         },
@@ -556,9 +558,9 @@ def get_policy_kwargs_grid(policy_class, model_name: str) -> list:
     
     common_transformer_kwargs = {
         "features_extractor_kwargs": {
-            "embed_dim": 256,  # Increased from 128
-            "num_heads": 8,
-            "num_layers": 2,
+            "embed_dim": 128,          # iso-capacity: ~251K total vs CNN-LSTM ~203K
+            "num_heads": 4,            # must divide embed_dim; 4x32=128
+            "num_layers": 1,
             "dropout": 0.1
         },
         "net_arch": [64, 64],
@@ -683,6 +685,11 @@ if os.path.exists(best_params_file):
     
     # Reconstruct policy and policy_kwargs from current configuration
     policy_kwargs = get_policy_kwargs_grid(policy, model)
+    walk_forward_params = {
+        "model_params": best_params,
+        "policy": policy,
+        "policy_kwargs": policy_kwargs[0] if USE_SEQUENCE_ENV and policy_kwargs else {},
+    }
     best_model = agent.get_model(
         model_name=model,
         policy=policy,
@@ -727,8 +734,15 @@ else:
     
     print(f"\n✅ Best hyperparameters saved to: {best_params_file}\n")
     
-    # Update best_params to only contain model_params for walk_forward
+    # best_params (JSON-safe model params only) is used for saving/loading.
+    # walk_forward_params carries the full dict including policy class and kwargs,
+    # so walk_forward_final_vs_checkpoint uses the correct architecture — not MlpPolicy.
     best_params = params_to_save
+    walk_forward_params = {
+        "model_params": params_to_save,
+        "policy": policy,
+        "policy_kwargs": get_policy_kwargs_grid(policy, model)[0] if USE_SEQUENCE_ENV else {},
+    }
 
 print("We have a best_model trained with these params")
 
@@ -759,7 +773,7 @@ for seed in seeds:
         start_date=start_date,
         end_date=end_date,
         model_name=model,
-        fixed_params=best_params,
+        fixed_params=walk_forward_params,
         rebalance_window=rebalance_window,
         val_window=val_window,
         total_timesteps=TOTAL_TIMESTEPS,
