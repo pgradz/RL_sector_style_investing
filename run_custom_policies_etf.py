@@ -255,7 +255,7 @@ if ENV_TYPE == 'portfolio':
         "action_space": stock_dimension, 
         "reward_scaling": 1,
         "macro_df": macro_df,
-        "reward_type": "dsr",  #  options: "log_return", "pnl", "dsr" (differential sharpe ratio), active_return
+        "reward_type": "pnl",  #  options: "log_return", "pnl", "dsr" (differential sharpe ratio), active_return
         "reward_transform": "ewma_zscore",  # unified scaling across reward types
         "reward_beta": 0.01,
         "reward_clip": 5.0,
@@ -716,7 +716,7 @@ else:
         total_timesteps=TOTAL_TIMESTEPS,
         env_constructor=lambda the_df, **kwargs: make_env(the_df, ENV_TYPE, **kwargs),  # Updated
         eval_freq=5_000,
-        best_model_save_path="./best_hparam_search",
+        best_model_save_path=f"./best_hparam_search_{reward_type}",
         **env_kwargs
     )
     
@@ -779,7 +779,7 @@ for seed in seeds:
         total_timesteps=TOTAL_TIMESTEPS,
         env_constructor=lambda the_df, **kwargs: make_env(the_df, ENV_TYPE, **kwargs),  # Updated
         eval_freq=5000,
-        best_model_prefix="./walkforward_best_model",
+        best_model_prefix=f"./walkforward_best_model_{reward_type}",
         seed=seed,
         **env_kwargs
     )
